@@ -392,10 +392,15 @@ main (int argc, char *argv[])
 
     timer_finish (&t);
 
+    printf("Writing result to %s... ", output_path);
+    fflush(stdout);
+
     if (!stbi_write_bmp (output_path, w, h, 4, pixels))
     {
         fprintf (stderr, "Failed to write image to %s\n", output_path);
     }
+
+    printf("Done :3\n");
 
     free (pixels);
     return 0;
