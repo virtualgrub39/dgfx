@@ -375,12 +375,14 @@ main (int argc, char *argv[])
         {
             perror ("dgfx_worker_init");
             free (pixels);
+            free(workers);
             return 1;
         }
         if (!dgfx_worker_start (&workers[i]))
         {
             perror ("dgfx_worker_start");
             free (pixels);
+            free(workers);
             return 1;
         }
     }
@@ -403,5 +405,6 @@ main (int argc, char *argv[])
     printf("Done :3\n");
 
     free (pixels);
+    free(workers);
     return 0;
 }
