@@ -3,11 +3,15 @@
 #include <lua.h>
 #include <lualib.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "ketopt.h"
 #include "stb_image_write.h"
+
+int do_time = 0;
 
 typedef struct
 {
@@ -22,6 +26,9 @@ typedef struct
 void
 timer_init (progress_timer_t *timer, uint32_t total_pixels)
 {
+    if (!do_time)
+        return;
+
     timer->start_time = clock ();
     timer->last_update = timer->start_time;
     timer->total_pixels = total_pixels;
@@ -37,6 +44,9 @@ timer_init (progress_timer_t *timer, uint32_t total_pixels)
 void
 timer_update (progress_timer_t *timer, uint32_t pixels_done)
 {
+    if (!do_time)
+        return;
+
     timer->processed_pixels += pixels_done;
 
     if (timer->processed_pixels % timer->update_interval == 0 || timer->processed_pixels == timer->total_pixels)
@@ -64,6 +74,9 @@ timer_update (progress_timer_t *timer, uint32_t pixels_done)
 void
 timer_finish (progress_timer_t *timer)
 {
+    if (!do_time)
+        return;
+
     clock_t end_time = clock ();
     double total_elapsed = (double)(end_time - timer->start_time) / CLOCKS_PER_SEC;
 
@@ -73,29 +86,102 @@ timer_finish (progress_timer_t *timer)
     printf ("Pixels per second: %.0f\n", timer->processed_pixels / total_elapsed);
 }
 
+enum
+{
+    ARG_HELP = 256,
+    // ARG_WIDTH,
+    // ARG_HEIGTH,
+    ARG_TIME,
+    ARG_INPUT,
+    ARG_OUTPUT,
+};
+
+const ko_longopt_t longopts[] = {
+    { "help", ko_no_argument, ARG_HELP },
+    { "time", ko_required_argument, ARG_TIME },
+    { "input", ko_required_argument, ARG_INPUT },
+    { "output", ko_required_argument, ARG_OUTPUT },
+};
+
+void
+usage (const char *progname)
+{
+    printf ("Usage: %s [FLAGS] [ARGS]\n", progname);
+    printf ("FLAGS:\n");
+    printf ("\t-h, --help   - display this message.\n");
+    printf ("\t-t, --time   - display timing information.\n");
+    printf ("ARGS:\n");
+    printf ("\t-W <integer> - specify output image width.  DEFAULT: 640\n");
+    printf ("\t-H <integer> - specify output image height. DEFAULT: 480\n");
+    printf ("\t-i, --input  - specify input lua file path.\n");
+    printf ("\t-o, --output - specify output bitmap path.  DEFAULT: \"output.bmp\"\n");
+}
+
 int
 main (int argc, char *argv[])
 {
-    if (argc != 4)
-    {
-        fprintf (stderr, "Usage: %s <width> <height> <lua file path>\n", argv[0]);
-        return 1;
-    }
+    ketopt_t s = KETOPT_INIT;
+    int c = 0;
+    const char *optstr = "hti:o:W:H:";
+
+    char *input_path = NULL;
+    char *output_path = "output.bmp";
+
+    uint32_t w = 640, h = 480;
 
     char *endptr = NULL;
-    uint32_t w = strtoul (argv[1], &endptr, 10);
-    if (endptr != argv[1] + strlen (argv[1]) || *endptr != 0)
+
+    while ((c = ketopt (&s, argc, argv, 1, optstr, longopts)) != -1)
     {
-        fprintf (stderr, "Invalid width\n");
-        return 1;
+        switch (c)
+        {
+        case 'h':
+        case ARG_HELP:
+            usage (argv[0]);
+            return 0;
+        case 'W':
+            endptr = NULL;
+            w = strtoul (s.arg, &endptr, 10);
+            if (endptr != s.arg + strlen (s.arg) || *endptr != 0)
+            {
+                fprintf (stderr, "Invalid width\n");
+                return 1;
+            }
+            break;
+        case 'H':
+            endptr = NULL;
+            h = strtoul (s.arg, &endptr, 10);
+            if (endptr != s.arg + strlen (s.arg) || *endptr != 0)
+            {
+                fprintf (stderr, "Invalid height\n");
+                return 1;
+            }
+            break;
+        case 't':
+        case ARG_TIME:
+            do_time = 1;
+            break;
+        case 'i':
+        case ARG_INPUT:
+            input_path = s.arg;
+            break;
+        case 'o':
+        case ARG_OUTPUT:
+            output_path = s.arg;
+            break;
+        case '?':
+            fprintf (stderr, "Unknown option: %s\n", argv[s.ind - 1]);
+            return 1;
+        case ':':
+            fprintf (stderr, "Option requires an argument: %s\n", argv[s.ind - 1]);
+            return 1;
+        }
     }
 
-    endptr = NULL;
-    uint32_t h = strtoul (argv[2], &endptr, 10);
-    if (endptr != argv[2] + strlen (argv[2]) || *endptr != 0)
+    if (!input_path)
     {
-        fprintf (stderr, "Invalid height\n");
-        return 1;
+        fprintf (stderr, "No input provided.\n");
+        return 0;
     }
 
     progress_timer_t t = { 0 };
@@ -121,7 +207,7 @@ main (int argc, char *argv[])
 
     lua_setglobal (L, "config");
 
-    if (luaL_dofile (L, argv[3]) != LUA_OK)
+    if (luaL_dofile (L, input_path) != LUA_OK)
     {
         fprintf (stderr, "Error while reading lua file: %s\n", lua_tostring (L, -1));
         lua_close (L);
@@ -181,9 +267,9 @@ main (int argc, char *argv[])
 
     // luaL_unref (L, LUA_REGISTRYINDEX, func_ref);
 
-    if (!stbi_write_bmp ("output.bmp", w, h, 4, pixels))
+    if (!stbi_write_bmp (output_path, w, h, 4, pixels))
     {
-        fprintf (stderr, "Failed to write output.bmp");
+        fprintf (stderr, "Failed to write image to %s\n", output_path);
     }
 
     free (pixels);
