@@ -28,6 +28,27 @@ char *output_path = "output.bmp";
 uint32_t w = 640, h = 480;
 size_t j = 1;
 
+const char *worker_lua_cb_src = "local _rgb_local = rgb\n"
+                                "function __dgfx_worker_cb(start, count, t)\n"
+                                "  local out = {}\n"
+                                "  local push = table.insert\n"
+                                "  local w = config.w\n"
+                                "  local h = config.h\n"
+                                "  local k = 1\n"
+                                "  for i = 0, count - 1 do\n"
+                                "    local idx = start + i\n"
+                                "    local x = idx % w\n"
+                                "    local y = (idx - x) / w\n"
+                                "    local r,g,b = _rgb_local(x, y, t)\n"
+                                "    local ir = math.floor(math.max(0, math.min(1, r)) * 255 + 0.5)\n"
+                                "    local ig = math.floor(math.max(0, math.min(1, g)) * 255 + 0.5)\n"
+                                "    local ib = math.floor(math.max(0, math.min(1, b)) * 255 + 0.5)\n"
+                                "    out[k] = string.char(ir, ig, ib, 255)\n"
+                                "    k = k + 1\n"
+                                "  end\n"
+                                "  return table.concat(out)\n"
+                                "end\n";
+
 typedef struct
 {
     struct timespec start_time;
@@ -134,6 +155,7 @@ typedef struct
     size_t start_idx;
     double t_param;
 
+    int cb_ref;
     int rgb_ref;
 
     pthread_mutex_t mutex;
@@ -170,55 +192,40 @@ dgfx_worker_work (void *arg)
         worker->pixels_done = 0;
         pthread_mutex_unlock (&worker->mutex);
 
-        size_t x = worker->start_idx % w;
-        size_t y = worker->start_idx / w;
-        size_t written = 0;
+        lua_rawgeti (worker->L, LUA_REGISTRYINDEX, worker->cb_ref);
+        lua_pushinteger (worker->L, (lua_Integer)worker->start_idx);
+        lua_pushinteger (worker->L, (lua_Integer)worker->pixels_count);
+        lua_pushnumber (worker->L, worker->t_param);
 
-        for (size_t yy = y; yy < (size_t)h && written < worker->pixels_count; ++yy)
+        if (lua_pcall (worker->L, 3, 1, 0) != LUA_OK)
         {
-            size_t xx_start = (yy == y) ? x : 0;
-            for (size_t xx = xx_start; xx < (size_t)w && written < worker->pixels_count; ++xx)
-            {
-                lua_rawgeti (worker->L, LUA_REGISTRYINDEX, worker->rgb_ref);
-
-                lua_pushinteger (worker->L, xx);
-                lua_pushinteger (worker->L, yy);
-                lua_pushnumber (worker->L, worker->t_param);
-
-                if (lua_pcall (worker->L, 3, 3, 0) != LUA_OK)
-                {
-                    fprintf (stderr, "Lua error in worker %u: %s\n", worker->id, lua_tostring (worker->L, -1));
-                    lua_pop (worker->L, 1);
-                    pthread_exit (NULL);
-                }
-
-                double r = lua_tonumberx (worker->L, -3, NULL);
-                double g = lua_tonumberx (worker->L, -2, NULL);
-                double b = lua_tonumberx (worker->L, -1, NULL);
-                lua_pop (worker->L, 3);
-
-                uint8_t ir = (uint8_t)((uint32_t)(fmax (0.0, fmin (1.0, r)) * 255.0 + 0.5));
-                uint8_t ig = (uint8_t)((uint32_t)(fmax (0.0, fmin (1.0, g)) * 255.0 + 0.5));
-                uint8_t ib = (uint8_t)((uint32_t)(fmax (0.0, fmin (1.0, b)) * 255.0 + 0.5));
-
-                size_t idx = ((size_t)yy * w + xx) * 4;
-                worker->pixels[idx + 0] = ir;
-                worker->pixels[idx + 1] = ig;
-                worker->pixels[idx + 2] = ib;
-                worker->pixels[idx + 3] = 0xFF;
-
-                timer_update (&t, 1);
-                ++written;
-
-                // Update progress (thread-safe)
-                pthread_mutex_lock (&worker->mutex);
-                worker->pixels_done = written;
-                pthread_mutex_unlock (&worker->mutex);
-            }
+            fprintf (stderr, "Lua error in worker %u: %s\n", worker->id, lua_tostring (worker->L, -1));
+            lua_pop (worker->L, 1);
+            pthread_exit (NULL);
         }
 
-        // Mark work as complete
+        size_t ret_len = 0;
+        const char *buf = lua_tolstring (worker->L, -1, &ret_len);
+
+        size_t expected = worker->pixels_count * 4;
+        if (ret_len != expected)
+        {
+            size_t copy_len = ret_len < expected ? ret_len : expected;
+            size_t byte_offset = worker->start_idx * 4;
+            memcpy (worker->pixels + byte_offset, buf, copy_len);
+            if (copy_len < expected)
+                memset (worker->pixels + byte_offset + copy_len, 0, expected - copy_len);
+        }
+        else
+        {
+            size_t byte_offset = worker->start_idx * 4;
+            memcpy (worker->pixels + byte_offset, buf, expected);
+        }
+
+        lua_pop (worker->L, 1);
+
         pthread_mutex_lock (&worker->mutex);
+        worker->pixels_done = worker->pixels_count;
         worker->has_work = false;
         worker->work_complete = true;
         pthread_cond_signal (&worker->done_cond);
@@ -267,13 +274,30 @@ dgfx_worker_init (DgfxWorker *worker, uint8_t idx, uint8_t *pixels, size_t start
 
     int ref = luaL_ref (L, LUA_REGISTRYINDEX);
 
+    if (luaL_loadstring (L, worker_lua_cb_src) != LUA_OK || lua_pcall (L, 0, 0, 0) != LUA_OK)
+    {
+        fprintf (stderr, "Failed to compile worker callback: %s\n", lua_tostring (L, -1));
+        lua_close (L);
+        return 0;
+    }
+
+    lua_getglobal (L, "__dgfx_worker_cb");
+    if (!lua_isfunction (L, -1))
+    {
+        fprintf (stderr, "__dgfx_worker_cb not found after compilation\n");
+        lua_close (L);
+        return 0;
+    }
+
+    int cb_ref = luaL_ref (L, LUA_REGISTRYINDEX); // ref the worker callback
+    worker->cb_ref = cb_ref;
+
     worker->L = L;
     worker->rgb_ref = ref;
     worker->pixels = pixels;
     worker->pixels_count = pixel_count;
     worker->start_idx = start_idx;
 
-    // Initialize synchronization primitives
     if (pthread_mutex_init (&worker->mutex, NULL) != 0)
     {
         lua_close (L);
@@ -301,7 +325,6 @@ dgfx_worker_init (DgfxWorker *worker, uint8_t idx, uint8_t *pixels, size_t start
     worker->thread_running = false;
     worker->pixels_done = 0;
 
-    // Start the persistent thread
     int err = pthread_create (&worker->thrd, NULL, dgfx_worker_work, worker);
     if (err != 0)
     {
@@ -367,8 +390,8 @@ dgfx_worker_shutdown (DgfxWorker *worker)
     pthread_join (worker->thrd, NULL);
     worker->thread_running = false;
 
-    // Cleanup
     luaL_unref (worker->L, LUA_REGISTRYINDEX, worker->rgb_ref);
+    luaL_unref (worker->L, LUA_REGISTRYINDEX, worker->cb_ref);
     lua_close (worker->L);
 
     pthread_cond_destroy (&worker->done_cond);
@@ -381,11 +404,15 @@ dgfx_do_frame (DgfxWorker *workers, double cur_t)
 {
     for (uint8_t i = 0; i < j; ++i)
     {
+        lua_gc (workers[i].L, LUA_GCSTOP, 1);
+
         if (!dgfx_worker_start_work (&workers[i], cur_t))
         {
             fprintf (stderr, "Failed to start work for worker %u\n", i);
             return 1;
         }
+
+        lua_gc (workers[i].L, LUA_GCRESTART, 1);
     }
 
     for (uint8_t i = 0; i < j; ++i)
@@ -409,9 +436,10 @@ dgfx_sdl_loop (void)
         return;
     }
 
-    if (!TTF_Init()) {
-        fprintf(stderr, "TTF_Init failed: %s\n", SDL_GetError());
-        SDL_Quit();
+    if (!TTF_Init ())
+    {
+        fprintf (stderr, "TTF_Init failed: %s\n", SDL_GetError ());
+        SDL_Quit ();
         return;
     }
 
@@ -428,19 +456,20 @@ dgfx_sdl_loop (void)
         if (!dgfx_worker_init (&workers[i], i, NULL, start, per))
         {
             perror ("dgfx_worker_init");
-            free(workers);
+            free (workers);
             goto cleanup_all;
         }
     }
 
-    TTF_Font *font = TTF_OpenFont("./SpaceMono-Regular.ttf", 24);
-    if (!font) {
-        fprintf(stderr, "TTF_OpenFont failed: %s\n", SDL_GetError());
+    TTF_Font *font = TTF_OpenFont ("./SpaceMono-Regular.ttf", 24);
+    if (!font)
+    {
+        fprintf (stderr, "TTF_OpenFont failed: %s\n", SDL_GetError ());
     }
 
     bool running = true;
     uint32_t frame_count = 0;
-    uint32_t last_fps_time = SDL_GetTicks();
+    uint32_t last_fps_time = SDL_GetTicks ();
     float fps = 0.0f;
     SDL_Texture *fps_texture = NULL;
 
@@ -460,25 +489,29 @@ dgfx_sdl_loop (void)
         double t = now / 1000.0;
 
         frame_count++;
-        if (now - last_fps_time >= 1000) {
+        if (now - last_fps_time >= 1000)
+        {
             fps = frame_count * 1000.0f / (now - last_fps_time);
             frame_count = 0;
             last_fps_time = now;
-            
-            if (fps_texture) {
-                SDL_DestroyTexture(fps_texture);
+
+            if (fps_texture)
+            {
+                SDL_DestroyTexture (fps_texture);
                 fps_texture = NULL;
             }
-            
-            if (font) {
+
+            if (font)
+            {
                 char fps_text[32];
-                snprintf(fps_text, sizeof(fps_text), "FPS: %.1f", fps);
-                
-                SDL_Color bright_color = {255, 255, 0, 255}; // Bright yellow
-                SDL_Surface *fps_surface = TTF_RenderText_Solid(font, fps_text, 0, bright_color);
-                if (fps_surface) {
-                    fps_texture = SDL_CreateTextureFromSurface(renderer, fps_surface);
-                    SDL_DestroySurface(fps_surface);
+                snprintf (fps_text, sizeof (fps_text), "FPS: %.1f", fps);
+
+                SDL_Color bright_color = { 255, 255, 0, 255 };
+                SDL_Surface *fps_surface = TTF_RenderText_Solid (font, fps_text, 0, bright_color);
+                if (fps_surface)
+                {
+                    fps_texture = SDL_CreateTextureFromSurface (renderer, fps_surface);
+                    SDL_DestroySurface (fps_surface);
                 }
             }
         }
@@ -506,14 +539,17 @@ dgfx_sdl_loop (void)
             fprintf (stderr, "SDL_RenderTexture failed: %s\n", SDL_GetError ());
         }
 
-        if (fps_texture) {
-            SDL_FRect fps_rect = {10, 10, 0, 0};
-            SDL_GetTextureSize(fps_texture, &fps_rect.w, &fps_rect.h);
-            SDL_RenderTexture(renderer, fps_texture, NULL, &fps_rect);
+        if (fps_texture)
+        {
+            SDL_FRect fps_rect = { 10, 10, 0, 0 };
+            SDL_GetTextureSize (fps_texture, &fps_rect.w, &fps_rect.h);
+            SDL_RenderTexture (renderer, fps_texture, NULL, &fps_rect);
         }
 
         SDL_RenderPresent (renderer);
     }
+
+    TTF_CloseFont (font);
 
     for (size_t i = 0; i < j; ++i)
     {
