@@ -25,6 +25,7 @@ int do_time = 0;
 int do_realtime = 0;
 char *input_path = NULL;
 char *output_path = "output.bmp";
+char *mode = "single";
 uint32_t w = 640, h = 480;
 size_t j = 1;
 
@@ -156,7 +157,6 @@ typedef struct
     double t_param;
 
     int cb_ref;
-    int rgb_ref;
 
     pthread_mutex_t mutex;
     pthread_cond_t work_cond;
@@ -206,6 +206,7 @@ dgfx_worker_work (void *arg)
 
         size_t ret_len = 0;
         const char *buf = lua_tolstring (worker->L, -1, &ret_len);
+        timer_update (&t, ret_len / 4);
 
         size_t expected = worker->pixels_count * 4;
         if (ret_len != expected)
@@ -267,12 +268,10 @@ dgfx_worker_init (DgfxWorker *worker, uint8_t idx, uint8_t *pixels, size_t start
     lua_getglobal (L, "rgb");
     if (!lua_isfunction (L, -1))
     {
-        fprintf (stderr, "Invalid `rgb` type. Expected function, got %s\n", lua_typename (L, lua_type (L, -1)));
+        fprintf (stderr, "rgb function not found\n");
         lua_close (L);
         return 0;
     }
-
-    int ref = luaL_ref (L, LUA_REGISTRYINDEX);
 
     if (luaL_loadstring (L, worker_lua_cb_src) != LUA_OK || lua_pcall (L, 0, 0, 0) != LUA_OK)
     {
@@ -293,7 +292,6 @@ dgfx_worker_init (DgfxWorker *worker, uint8_t idx, uint8_t *pixels, size_t start
     worker->cb_ref = cb_ref;
 
     worker->L = L;
-    worker->rgb_ref = ref;
     worker->pixels = pixels;
     worker->pixels_count = pixel_count;
     worker->start_idx = start_idx;
@@ -390,7 +388,6 @@ dgfx_worker_shutdown (DgfxWorker *worker)
     pthread_join (worker->thrd, NULL);
     worker->thread_running = false;
 
-    luaL_unref (worker->L, LUA_REGISTRYINDEX, worker->rgb_ref);
     luaL_unref (worker->L, LUA_REGISTRYINDEX, worker->cb_ref);
     lua_close (worker->L);
 
@@ -575,14 +572,13 @@ enum
     ARG_TIME,
     ARG_INPUT,
     ARG_OUTPUT,
-    ARG_REALTIME,
+    ARG_MODE,
 };
 
-const ko_longopt_t longopts[] = {
-    { "help", ko_no_argument, ARG_HELP },           { "time", ko_required_argument, ARG_TIME },
-    { "realtime", ko_no_argument, ARG_REALTIME },   { "input", ko_required_argument, ARG_INPUT },
-    { "output", ko_required_argument, ARG_OUTPUT },
-};
+const ko_longopt_t longopts[]
+    = { { "help", ko_no_argument, ARG_HELP },           { "time", ko_required_argument, ARG_TIME },
+        { "mode", ko_required_argument, ARG_MODE },     { "input", ko_required_argument, ARG_INPUT },
+        { "output", ko_required_argument, ARG_OUTPUT }, { NULL, 0, 0 } };
 
 void
 usage (const char *progname)
@@ -590,13 +586,17 @@ usage (const char *progname)
     printf ("Usage: %s [FLAGS] [ARGS]\n", progname);
     printf ("FLAGS:\n");
     printf ("\t-h, --help   - display this message.\n");
-    printf ("\t-t, --time   - display timing information.\n");
+    printf ("\t-t, --time   - display timing information (only in single mode).\n");
     printf ("ARGS:\n");
-    printf ("\t-W <integer> - specify output image width.  DEFAULT: 640\n");
-    printf ("\t-H <integer> - specify output image height. DEFAULT: 480\n");
-    printf ("\t-i, --input  - specify input lua file path.\n");
-    printf ("\t-o, --output - specify output bitmap path.  DEFAULT: \"output.bmp\"\n");
-    printf ("\t-j <integer> - specify number of threads to use for rendering. DEFAULT: 1\n");
+    printf ("\t-W           <integer> - specify output image width.                     DEFAULT: 640\n");
+    printf ("\t-H           <integer> - specify output image height.                    DEFAULT: 480\n");
+    printf ("\t-i, --input  <path>    - specify input lua file path.\n");
+    printf ("\t-o, --output <path>    - specify output bitmap path.                     DEFAULT: \"output.bmp\"\n");
+    printf ("\t-j           <integer> - specify number of threads to use for rendering. DEFAULT: 1\n");
+    printf ("\t-m, --mode   <MODE>    - specify output mode.                            DEFAULT: single\n");
+    printf ("MODE:\n");
+    printf ("\tsingle   - program outputs single frame, with t=0.0, to bitmap.\n");
+    printf ("\trealtime - program displays pixels in SDL3 window, passing time from window creation in seconds to t.\n");
 }
 
 int
@@ -604,7 +604,7 @@ main (int argc, char *argv[])
 {
     ketopt_t s = KETOPT_INIT;
     int c = 0;
-    const char *optstr = "htri:o:W:H:j:";
+    const char *optstr = "hti:o:W:H:j:m:";
 
     char *endptr = NULL;
 
@@ -638,9 +638,9 @@ main (int argc, char *argv[])
         case ARG_TIME:
             do_time = 1;
             break;
-        case 'r':
-        case ARG_REALTIME:
-            do_realtime = 1;
+        case 'm':
+        case ARG_MODE:
+            mode = s.arg;
             break;
         case 'i':
         case ARG_INPUT:
@@ -677,7 +677,7 @@ main (int argc, char *argv[])
         return 0;
     }
 
-    if (!do_realtime)
+    if (strcmp (mode, "single") == 0)
     {
         size_t pixel_count = w * h;
         uint8_t *pixels = calloc (pixel_count * 4, sizeof (uint8_t));
@@ -724,10 +724,14 @@ main (int argc, char *argv[])
         free (pixels);
         free (workers);
     }
-    else
+    else if (strcmp (mode, "realtime") == 0)
     {
         do_time = 0;
         dgfx_sdl_loop ();
+    }
+    else
+    {
+        fprintf (stderr, "Invalid mode\n");
     }
 
     return 0;
