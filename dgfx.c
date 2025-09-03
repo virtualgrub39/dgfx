@@ -108,13 +108,17 @@ dgfx_worker_work (void *arg)
         lua_rawgeti (w->L, LUA_REGISTRYINDEX, w->lua_cb_ref);
 
         // lua_pushlightuserdata (w->L, (void *)w->pixels); /* uint8_t ** */ // ffi
-        uint8_t *pixels = *(w->pixels);
-        lua_pushinteger (w->L, (lua_Integer)w->start_idx);
-        lua_pushinteger (w->L, (lua_Integer)w->work_len);
         lua_pushnumber (w->L, (lua_Number)w->t_param);
 
+        if (lua_pcall (w->L, 1, 1, 0) != LUA_OK)
+        {
+            fprintf (stderr, "Lua error in worker %u: %s\n", w->id, lua_tostring (w->L, -1));
+            lua_pop (w->L, 1);
+            pthread_exit (NULL);
+        }
+
         // WITH FFI (disabled, bad performance for some reason)
-        // if (lua_pcall (w->L, 4, 0, 0) != LUA_OK)
+        // if (lua_pcall (w->L, 2, 0, 0) != LUA_OK)
         // {
         //     fprintf (stderr, "Lua error in worker %u: %s\n", w->id, lua_tostring (w->L, -1));
         //     lua_pop (w->L, 1);
@@ -122,15 +126,9 @@ dgfx_worker_work (void *arg)
         //     pthread_exit (NULL);
         // }
 
-        if (lua_pcall (w->L, 3, 1, 0) != LUA_OK)
-        {
-            fprintf (stderr, "Lua error in worker %u: %s\n", w->id, lua_tostring (w->L, -1));
-            lua_pop (w->L, 1);
-            pthread_exit (NULL);
-        }
-
         size_t ret_len = 0;
         const char *buf = lua_tolstring (w->L, -1, &ret_len);
+        uint8_t *pixels = *(w->pixels);
 
         size_t expected = w->work_len * 4;
         if (ret_len != expected)
@@ -207,6 +205,19 @@ dgfx_worker_init (struct dgfx_worker *w, uint8_t id, uint8_t **pixels, size_t st
     lua_pushinteger (w->L, dgfx_config.h);
     lua_setfield (w->L, -2, "height");
 
+    lua_newtable(w->L); // worker
+
+    lua_pushinteger(w->L, start_idx);
+    lua_setfield(w->L, -2, "start");
+
+    lua_pushinteger(w->L, work_len);
+    lua_setfield(w->L, -2, "len");
+
+    lua_pushinteger(w->L, id);
+    lua_setfield(w->L, -2, "id");
+
+    lua_setfield(w->L, -2, "worker");
+
     lua_setglobal (w->L, "dgfx");
 
     if (luaL_loadfile (w->L, dgfx_config.input_path) != 0)
@@ -265,7 +276,7 @@ dgfx_worker_init_oopsie:
     return false;
 }
 
-int
+bool
 dgfx_worker_start_work (struct dgfx_worker *w, double cur_t)
 {
     pthread_mutex_lock (&w->mutex);
@@ -273,7 +284,7 @@ dgfx_worker_start_work (struct dgfx_worker *w, double cur_t)
     if (!w->thread_running)
     {
         pthread_mutex_unlock (&w->mutex);
-        return 0;
+        return false;
     }
 
     w->t_param = cur_t;
@@ -281,10 +292,10 @@ dgfx_worker_start_work (struct dgfx_worker *w, double cur_t)
     pthread_cond_signal (&w->work_cond);
 
     pthread_mutex_unlock (&w->mutex);
-    return 1;
+    return true;
 }
 
-int
+bool
 dgfx_worker_wait_completion (struct dgfx_worker *w)
 {
     pthread_mutex_lock (&w->mutex);
@@ -294,7 +305,7 @@ dgfx_worker_wait_completion (struct dgfx_worker *w)
         pthread_cond_wait (&w->done_cond, &w->mutex);
     }
 
-    int success = w->work_complete && (w->work_done == w->work_len);
+    bool success = w->work_complete && (w->work_done == w->work_len);
     pthread_mutex_unlock (&w->mutex);
 
     return success;

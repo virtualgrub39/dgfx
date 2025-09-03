@@ -1,63 +1,76 @@
--- local ffi = require("ffi")
--- ffi.cdef [[
--- typedef unsigned char uint8_t;
--- typedef uint8_t *uint8_ptr;
--- typedef uint8_t **uint8_pp;
--- ]]
+do
+  local _rgb = rgb
+  local width = dgfx.width
 
--- function __dgfx_worker_cb(pp_ld, start_idx, work_len, t)
---     local pp = ffi.cast("uint8_pp", pp_ld)
---     local base = pp[0]
---     if base == nil then
---         return
---     end
+  local floor = math.floor
+  local s_char = string.char
+  local t_concat = table.concat
 
---     local start_px = tonumber(start_idx)
---     local n_px = tonumber(work_len)
---     if n_px <= 0 then
---         return
---     end
+  local start = dgfx.worker.start
+  local count = dgfx.worker.len 
 
---     local p = base + (start_px * 4)
+  local start_x = start % width
+  local start_y = (start - start_x) / width
 
---     for i = 0, n_px - 1 do
---         local idx = (start_px + i)
---         local n = idx % dgfx.width
---         local m = (idx - n) / dgfx.width
-
---         r, g, b = rgb(n, m, t)
-
---         local ir = math.floor(math.max(0, math.min(1, r)) * 255 + 0.5)
---         local ig = math.floor(math.max(0, math.min(1, g)) * 255 + 0.5)
---         local ib = math.floor(math.max(0, math.min(1, b)) * 255 + 0.5)
-
---         local byte_off = i * 4
-
---         p[byte_off + 0] = ir -- R
---         p[byte_off + 1] = ig -- G
---         p[byte_off + 2] = ib -- B
---         p[byte_off + 3] = 255 -- A
---     end
--- end
-
-local _rgb_local = rgb
-local w = dgfx.width
-local h = dgfx.width
-local push = table.insert
-
-function __dgfx_worker_cb(start, count, t)
   local out = {}
-  local k = 1
-  for i = 0, count - 1 do
-    local idx = start + i
-    local x = idx % w
-    local y = (idx - x) / w
-    local r,g,b = _rgb_local(x, y, t)
-    local ir = math.floor(math.max(0, math.min(1, r)) * 255 + 0.5)
-    local ig = math.floor(math.max(0, math.min(1, g)) * 255 + 0.5)
-    local ib = math.floor(math.max(0, math.min(1, b)) * 255 + 0.5)
-    out[k] = string.char(ir, ig, ib, 255)
-    k = k + 1
+  
+  for i = 1, count do -- pre-allocate
+    out[i] = ""
   end
-  return table.concat(out)
+
+  function __dgfx_worker_cb(t)
+    local x = start_x
+    local y = start_y
+    
+    local i = 1
+    local remaining = count
+    
+    local r, g, b
+
+    while remaining >= 4 do -- unroll 4 iterations
+      -- Pixel 1
+      r, g, b = _rgb(x, y, t)
+      out[i] = s_char(r * 255, g * 255, b * 255, 255)
+      x = x + 1
+      if x == width then x = 0; y = y + 1 end
+      
+      -- Pixel 2
+      r, g, b = _rgb(x, y, t)
+      out[i + 1] = s_char(r * 255, g * 255, b * 255, 255)
+      x = x + 1
+      if x == width then x = 0; y = y + 1 end
+      
+      -- Pixel 3
+      r, g, b = _rgb(x, y, t)
+      out[i + 2] = s_char(r * 255, g * 255, b * 255, 255)
+      x = x + 1
+      if x == width then x = 0; y = y + 1 end
+      
+      -- Pixel 4
+      r, g, b = _rgb(x, y, t)
+      out[i + 3] = s_char(r * 255, g * 255, b * 255, 255)
+      x = x + 1
+      if x == width then x = 0; y = y + 1 end
+      
+      i = i + 4
+      remaining = remaining - 4
+    end
+    
+    -- remaining :3
+    while remaining > 0 do
+      r, g, b = _rgb(x, y, t)
+      out[i] = s_char(r * 255, g * 255, b * 255, 255)
+      
+      x = x + 1
+      if x == width then
+        x = 0
+        y = y + 1
+      end
+      
+      i = i + 1
+      remaining = remaining - 1
+    end
+
+    return t_concat(out)
+  end
 end
