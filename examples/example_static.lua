@@ -42,8 +42,8 @@ local function hsv2rgb(h, s, v)
 end
 
 function rgb(n, m)
-    local cx = map(n, 0, config.w, -2.5, 1)
-    local cy = map(m, 0, config.h, -1.2, 1.2)
+    local cx = map(n, 0, dgfx.width, -2.5, 1)
+    local cy = map(m, 0, dgfx.height, -1.2, 1.2)
     local zx, zy = 0, 0
     local maxIter = 100
     local iter = 0

@@ -1,7 +1,7 @@
 function rgb(n, m, t)
-    local aspect = config.w / config.h
-    local screen_x = (2.0 * n / config.w - 1.0) * aspect
-    local screen_y = 1.0 - 2.0 * m / config.h
+    local aspect = dgfx.width / dgfx.height
+    local screen_x = (2.0 * n / dgfx.width - 1.0) * aspect
+    local screen_y = 1.0 - 2.0 * m / dgfx.height
     
     local cam_x = 3 * math.sin(t * 0.3)
     local cam_y = 2 + math.sin(t * 0.4) * 0.5

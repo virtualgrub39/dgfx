@@ -11,5 +11,6 @@ CompileFlags:
       "-std=c99",
       "-D_POSIX_C_SOURCE=200112L",
       "-Wno-initializer-overrides",
+      "-Iextern",
     ]
   Compiler: gcc

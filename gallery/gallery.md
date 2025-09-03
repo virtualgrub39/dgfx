@@ -2,8 +2,8 @@
 ![rgb.bmp](rgb.bmp)
 ```lua
 function rgb(n,m)
-  local x = n / config.w
-  local y = m / config.h
+  local x = n / dgfx.width
+  local y = m / dgfx.height
   return x, (1 - x) * y, 1 - y
 end
 ```
@@ -12,8 +12,8 @@ end
 ![interference stripes.bmp](<interference stripes.bmp>)
 ```lua
 function rgb(n,m)
-  local x = n / config.w
-  local y = m / config.h
+  local x = n / dgfx.width
+  local y = m / dgfx.height
   local f1 = math.sin(30 * x + 10 * y)
   local f2 = math.sin(40 * x - 15 * y)
   local r = (f1 + 1) * 0.5
@@ -27,10 +27,10 @@ end
 ![radial ripples.bmp](<radial ripples.bmp>)
 ```lua
 function rgb(n,m)
-  local cx = config.w * 0.5
-  local cy = config.h * 0.5
-  local dx = (n - cx) / config.w
-  local dy = (m - cy) / config.h
+  local cx = dgfx.width * 0.5
+  local cy = dgfx.height * 0.5
+  local dx = (n - cx) / dgfx.width
+  local dy = (m - cy) / dgfx.height
   local r = math.sqrt(dx*dx + dy*dy)
   local wave = 0.5 + 0.5 * math.cos(40 * r - 6 * r*r)
   return wave, wave * 0.6 + 0.2, 1 - wave
@@ -41,8 +41,8 @@ end
 ![complex.bmp](<complex.bmp>)
 ```lua
 function rgb(n,m)
-  local x = map(n, 0, config.w, -2.5, 2.5)
-  local y = map(m, 0, config.h, -2, 2)
+  local x = map(n, 0, dgfx.width, -2.5, 2.5)
+  local y = map(m, 0, dgfx.height, -2, 2)
   local zx, zy = x, y
   local x2 = zx*zx - zy*zy
   local y2 = 2*zx*zy
@@ -63,8 +63,8 @@ end
 ![mandelbrot.bmp](<mandelbrot.bmp>)
 ```lua
 function rgb(n,m)
-  local cx = map(n, 0, config.w, -2.5, 1)
-  local cy = map(m, 0, config.h, -1.2, 1.2)
+  local cx = map(n, 0, dgfx.width, -2.5, 1)
+  local cy = map(m, 0, dgfx.height, -1.2, 1.2)
   local zx, zy = 0, 0
   local maxIter = 100
   local iter = 0
@@ -91,8 +91,8 @@ end
 ![julia.bmp](<julia.bmp>)
 ```lua
 function rgb(n,m)
-  local zx = map(n, 0, config.w, -1.5, 1.5)
-  local zy = map(m, 0, config.h, -1.5, 1.5)
+  local zx = map(n, 0, dgfx.width, -1.5, 1.5)
+  local zy = map(m, 0, dgfx.height, -1.5, 1.5)
   local cx, cy = -0.7, 0.27015
   local maxIter = 150
   local iter = 0
@@ -113,8 +113,8 @@ end
 ![fake 3d.bmp](<fake 3d.bmp>)
 ```lua
 function rgb(n,m)
-  local x = map(n, 0, config.w, -1, 1)
-  local y = map(m, 0, config.h, -1, 1)
+  local x = map(n, 0, dgfx.width, -1, 1)
+  local y = map(m, 0, dgfx.height, -1, 1)
   local cx, cy, r = 0, 0, 0.6
   local dx, dy = x - cx, y - cy
   local d = math.sqrt(dx*dx + dy*dy)

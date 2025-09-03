@@ -1,2 +1,4 @@
 output.bmp
 dgfx
+*.o
+config.h

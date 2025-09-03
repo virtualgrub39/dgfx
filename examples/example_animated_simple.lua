@@ -24,8 +24,8 @@ function length(x, y)
 end
 
 function rgb(n, m, time)
-    local uv_x = (n * 2.0 - config.w) / config.h
-    local uv_y = (m * 2.0 - config.h) / config.h
+    local uv_x = (n * 2.0 - dgfx.width) / dgfx.height
+    local uv_y = (m * 2.0 - dgfx.height) / dgfx.height
     
     local uv0_x, uv0_y = uv_x, uv_y
     local finalColor_r, finalColor_g, finalColor_b = 0.0, 0.0, 0.0
