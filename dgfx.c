@@ -107,7 +107,6 @@ dgfx_worker_work (void *arg)
 
         lua_rawgeti (w->L, LUA_REGISTRYINDEX, w->lua_cb_ref);
 
-        // lua_pushlightuserdata (w->L, (void *)w->pixels); /* uint8_t ** */ // ffi
         lua_pushnumber (w->L, (lua_Number)w->t_param);
 
         if (lua_pcall (w->L, 1, 1, 0) != LUA_OK)
@@ -116,15 +115,6 @@ dgfx_worker_work (void *arg)
             lua_pop (w->L, 1);
             pthread_exit (NULL);
         }
-
-        // WITH FFI (disabled, bad performance for some reason)
-        // if (lua_pcall (w->L, 2, 0, 0) != LUA_OK)
-        // {
-        //     fprintf (stderr, "Lua error in worker %u: %s\n", w->id, lua_tostring (w->L, -1));
-        //     lua_pop (w->L, 1);
-        //     w->thread_running = false;
-        //     pthread_exit (NULL);
-        // }
 
         size_t ret_len = 0;
         const char *buf = lua_tolstring (w->L, -1, &ret_len);
@@ -219,6 +209,8 @@ dgfx_worker_init (struct dgfx_worker *w, uint8_t id, uint8_t **pixels, size_t st
     lua_setfield(w->L, -2, "worker");
 
     lua_setglobal (w->L, "dgfx");
+
+    // fprintf(stdout, "id: %u, start: %lu, len: %lu\n", id, start_idx, work_len);
 
     if (luaL_loadfile (w->L, dgfx_config.input_path) != 0)
     {
@@ -476,7 +468,7 @@ dgfx_sdl_loop (void)
         double t = now / 1000.0;
 
         frame_count++;
-        if (now - last_fps_time >= 1000)
+        if (now - last_fps_time >= 200)
         {
             fps = frame_count * 1000.0f / (now - last_fps_time);
             frame_count = 0;
