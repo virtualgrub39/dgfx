@@ -195,18 +195,18 @@ dgfx_worker_init (struct dgfx_worker *w, uint8_t id, uint8_t **pixels, size_t st
     lua_pushinteger (w->L, dgfx_config.h);
     lua_setfield (w->L, -2, "height");
 
-    lua_newtable(w->L); // worker
+    lua_newtable (w->L); // worker
 
-    lua_pushinteger(w->L, start_idx);
-    lua_setfield(w->L, -2, "start");
+    lua_pushinteger (w->L, start_idx);
+    lua_setfield (w->L, -2, "start");
 
-    lua_pushinteger(w->L, work_len);
-    lua_setfield(w->L, -2, "len");
+    lua_pushinteger (w->L, work_len);
+    lua_setfield (w->L, -2, "len");
 
-    lua_pushinteger(w->L, id);
-    lua_setfield(w->L, -2, "id");
+    lua_pushinteger (w->L, id);
+    lua_setfield (w->L, -2, "id");
 
-    lua_setfield(w->L, -2, "worker");
+    lua_setfield (w->L, -2, "worker");
 
     lua_setglobal (w->L, "dgfx");
 
@@ -370,7 +370,7 @@ dgfx_init (uint8_t *init_pixels)
 }
 
 uint8_t *
-dgfx_pixels_set (uint8_t *new)
+dgfx_pixels_set (void *new)
 {
     if (!new)
         UNREACHABLE;
@@ -524,6 +524,7 @@ dgfx_sdl_loop (void)
 
         SDL_RenderPresent (renderer);
     }
+
     if (font)
         TTF_CloseFont (font);
     if (texture)
@@ -672,13 +673,13 @@ main (int argc, char *argv[])
     switch (dgfx_config.mode)
     {
     case MODE_SINGLE: {
-        uint8_t *pixels = malloc (dgfx_config.h * dgfx_config.w * 4);
+        uint32_t *pixels = malloc (dgfx_config.h * dgfx_config.w * sizeof (uint32_t));
         if (!pixels)
         {
             perror ("malloc");
             return 1;
         }
-        dgfx_pixels_set (pixels);
+        dgfx_pixels_set ((uint8_t *)pixels);
 
         if (!dgfx_doframe (0))
         {
@@ -688,19 +689,21 @@ main (int argc, char *argv[])
             return 1;
         }
 
-        int result = 0;
-
         if (!stbi_write_bmp (dgfx_config.output_path, dgfx_config.w, dgfx_config.h, 4, pixels))
         {
-            result = 1;
             fprintf (stderr, "Failed to write image to %s\n", dgfx_config.output_path);
         }
 
         free (pixels);
-        return result;
     }
     break;
     case MODE_REALTIME: {
+        if (strcmp (dgfx_config.output_path, DGFX_OUTPUT_PATH_DEFAULT) != 0)
+        {
+            fprintf (stderr, "Warning: \"output\" argument is only intended for use in single mode. It's ignored in "
+                             "realtime mode.\n");
+        }
+
         dgfx_sdl_loop ();
     }
     break;
