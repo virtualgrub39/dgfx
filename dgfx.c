@@ -1,3 +1,6 @@
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
@@ -39,8 +42,9 @@ enum
 {
     MODE_SINGLE = 0,
     MODE_REALTIME,
+    MODE_RENDER
 };
-const char *_mode_strings[] = { [MODE_SINGLE] = "single", [MODE_REALTIME] = "realtime" };
+const char *_mode_strings[] = { [MODE_SINGLE] = "single", [MODE_REALTIME] = "realtime", [MODE_RENDER] = "render" };
 
 struct
 {
@@ -49,12 +53,16 @@ struct
     const char *input_path;
     const char *output_path;
     size_t worker_n;
+    size_t frame_count;
+    uint32_t fps;
 } dgfx_config = { .w = DGFX_RESOLUTION_W_DEFUALT,
                   .h = DGFX_RESOLUTION_H_DEFAULT,
                   .mode = 0,
                   .input_path = NULL,
                   .output_path = DGFX_OUTPUT_PATH_DEFAULT,
-                  .worker_n = 1 };
+                  .worker_n = 1,
+                  .fps = 120,
+                  .frame_count = 3600 };
 
 struct dgfx_worker
 {
@@ -392,7 +400,7 @@ dgfx_deinit (void)
 }
 
 bool
-dgfx_doframe (double cur_t)
+dgfx_frame_begin (double cur_t)
 {
     for (uint8_t i = 0; i < dgfx_config.worker_n; ++i)
     {
@@ -407,6 +415,12 @@ dgfx_doframe (double cur_t)
         lua_gc (dgfx_ctx.workers[i].L, LUA_GCRESTART, 1);
     }
 
+    return true;
+}
+
+bool
+dgfx_frame_wait (void)
+{
     for (uint8_t i = 0; i < dgfx_config.worker_n; ++i)
     {
         if (!dgfx_worker_wait_completion (&dgfx_ctx.workers[i]))
@@ -415,8 +429,15 @@ dgfx_doframe (double cur_t)
             return false;
         }
     }
-
     return true;
+}
+
+bool
+dgfx_doframe (double cur_t)
+{
+    if (!dgfx_frame_begin (cur_t))
+        return false;
+    return dgfx_frame_wait ();
 }
 
 void
@@ -454,6 +475,8 @@ dgfx_sdl_loop (void)
 
     while (running)
     {
+        uint32_t frame_start = SDL_GetTicks ();
+
         SDL_Event event;
         while (SDL_PollEvent (&event))
         {
@@ -464,7 +487,7 @@ dgfx_sdl_loop (void)
             }
         }
 
-        uint32_t now = SDL_GetTicks ();
+        uint32_t now = frame_start;
         double t = now / 1000.0;
 
         frame_count++;
@@ -504,7 +527,6 @@ dgfx_sdl_loop (void)
         }
 
         dgfx_pixels_set (locked_ptr);
-
         dgfx_doframe (t);
 
         SDL_UnlockTexture (texture);
@@ -523,6 +545,17 @@ dgfx_sdl_loop (void)
         }
 
         SDL_RenderPresent (renderer);
+
+        if (dgfx_config.fps > 0)
+        {
+            uint32_t target_ms = (uint32_t)(1000.0 / (double)dgfx_config.fps + 0.5);
+            uint32_t frame_ms = SDL_GetTicks () - frame_start;
+
+            if (frame_ms < target_ms)
+            {
+                SDL_Delay (target_ms - frame_ms);
+            }
+        }
     }
 
     if (font)
@@ -536,6 +569,85 @@ dgfx_sdl_loop (void)
     SDL_Quit ();
 }
 
+void
+dgfx_ffmpeg_render (void)
+{
+    int pipefd[2];
+    if (pipe (pipefd) < 0)
+    {
+        perror ("pipe");
+        return;
+    }
+
+    pid_t pid = fork ();
+    if (pid == -1)
+    {
+        perror ("fork");
+        close (pipefd[0]);
+        close (pipefd[1]);
+        return;
+    }
+
+    if (pid == 0) // child
+    {
+        close (pipefd[1]);
+        dup2 (pipefd[0], STDIN_FILENO);
+        close (pipefd[0]);
+
+        char fps_str[16];
+        snprintf (fps_str, sizeof (fps_str), "%u", dgfx_config.fps);
+
+        char resolution_str[32];
+        snprintf (resolution_str, sizeof (resolution_str), "%lux%lu", dgfx_config.w, dgfx_config.h);
+
+        execl (DGFX_FFMPEG_PATH, "ffmpeg", "-y", "-f", "rawvideo", "-pixel_format", "rgba", "-video_size",
+               resolution_str, "-framerate", fps_str, "-i", "pipe:0", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-loglevel", "error", "-stats",
+               dgfx_config.output_path, (char *)NULL);
+
+        perror ("execl");
+        _exit (1);
+    }
+    else // parrent
+    {
+        close (pipefd[0]);
+
+        uint32_t *pixels = malloc (dgfx_config.h * dgfx_config.w * sizeof (uint32_t));
+        if (!pixels)
+        {
+            perror ("malloc");
+            return;
+        }
+        dgfx_pixels_set ((uint8_t *)pixels);
+
+        for (size_t frame = 0; frame < dgfx_config.frame_count; frame++)
+        {
+            double cur_t = ((double)frame / dgfx_config.fps);
+
+            if (!dgfx_doframe (cur_t))
+            {
+                fprintf (stderr, "Frame %lu generation failed\n", frame);
+                break;
+            }
+
+            size_t bytes_to_write = dgfx_config.h * dgfx_config.w * sizeof (uint32_t);
+            if (write (pipefd[1], pixels, bytes_to_write) != (long)bytes_to_write)
+            {
+                perror ("write to pipe");
+                break;
+            }
+        }
+
+        close (pipefd[1]);
+        free (pixels);
+
+        int status;
+        waitpid (pid, &status, 0);
+        return;
+    }
+
+    UNREACHABLE;
+}
+
 enum
 {
     ARG_HELP = 256,
@@ -545,13 +657,20 @@ enum
     ARG_OUTPUT,
     ARG_MODE,
     ARG_JOBS,
+    ARG_FPS,
+    ARG_FRAME_COUNT,
 };
 
-const ko_longopt_t longopts[]
-    = { { "help", ko_no_argument, ARG_HELP },           { "mode", ko_required_argument, ARG_MODE },
-        { "input", ko_required_argument, ARG_INPUT },   { "output", ko_required_argument, ARG_OUTPUT },
-        { "jobs", ko_required_argument, ARG_JOBS },     { "width", ko_required_argument, ARG_WIDTH },
-        { "heigth", ko_required_argument, ARG_HEIGHT }, { NULL, 0, 0 } };
+const ko_longopt_t longopts[] = { { "help", ko_no_argument, ARG_HELP },
+                                  { "mode", ko_required_argument, ARG_MODE },
+                                  { "input", ko_required_argument, ARG_INPUT },
+                                  { "output", ko_required_argument, ARG_OUTPUT },
+                                  { "jobs", ko_required_argument, ARG_JOBS },
+                                  { "width", ko_required_argument, ARG_WIDTH },
+                                  { "heigth", ko_required_argument, ARG_HEIGHT },
+                                  { "fps", ko_required_argument, ARG_FPS },
+                                  { "frame-count", ko_required_argument, ARG_FRAME_COUNT },
+                                  { NULL, 0, 0 } };
 
 void
 usage (const char *progname)
@@ -560,18 +679,21 @@ usage (const char *progname)
     printf ("FLAGS:\n");
     printf ("\t-h, --help   - display this message.\n");
     printf ("ARGS:\n");
-    printf ("\t-W, --width  <integer> - specify output image width.                     DEFAULT: %u\n",
+    printf ("\t-W, --width   <integer> - specify output image width.                     DEFAULT: %u\n",
             DGFX_RESOLUTION_W_DEFUALT);
-    printf ("\t-H, --height <integer> - specify output image height.                    DEFAULT: %u\n",
+    printf ("\t-H, --height  <integer> - specify output image height.                    DEFAULT: %u\n",
             DGFX_RESOLUTION_H_DEFAULT);
-    printf ("\t-i, --input  <path>    - specify input lua file path.\n");
-    printf ("\t-o, --output <path>    - specify output bitmap path.                     DEFAULT: "
+    printf ("\t-i, --input   <path>    - specify input lua file path.\n");
+    printf ("\t-o, --output  <path>    - specify output file path.                       DEFAULT: "
             "\"" DGFX_OUTPUT_PATH_DEFAULT "\"\n");
-    printf ("\t-j, --jobs   <integer> - specify number of threads to use for rendering. DEFAULT: 1\n");
-    printf ("\t-m, --mode   <MODE>    - specify output mode.                            DEFAULT: %s\n",
+    printf ("\t-j, --jobs    <integer> - specify number of threads to use for rendering. DEFAULT: 1\n");
+    printf ("\t-m, --mode    <MODE>    - specify output mode.                            DEFAULT: %s\n",
             _mode_strings[0]);
+    printf ("\t--fps         <integer> - specify fps limit for applicable modes.         DEFAULT: 60\n");
+    printf ("\t--frame-count <integer> - specify frame count for render mode.            DEFAULT: 1800\n");
     printf ("MODE:\n");
     printf ("\tsingle   - program outputs single frame, with t=0.0, to bitmap.\n");
+    printf ("\trender   - program calls on ffmpeg to render frames as video.\n");
     printf (
         "\trealtime - program displays pixels in SDL3 window, passing time from window creation in seconds to t.\n");
 }
@@ -652,6 +774,24 @@ main (int argc, char *argv[])
         case ARG_OUTPUT:
             dgfx_config.output_path = s.arg;
             break;
+        case ARG_FPS:
+            endptr = NULL;
+            dgfx_config.fps = strtoul (s.arg, &endptr, 10);
+            if (endptr != s.arg + strlen (s.arg) || *endptr != 0)
+            {
+                fprintf (stderr, "Invalid fps\n");
+                return 1;
+            }
+            break;
+        case ARG_FRAME_COUNT:
+            endptr = NULL;
+            dgfx_config.frame_count = strtoul (s.arg, &endptr, 10);
+            if (endptr != s.arg + strlen (s.arg) || *endptr != 0)
+            {
+                fprintf (stderr, "Invalid fps\n");
+                return 1;
+            }
+            break;
         case '?':
             fprintf (stderr, "Unknown option: %s\n", argv[s.ind]);
             return 1;
@@ -700,11 +840,15 @@ main (int argc, char *argv[])
     case MODE_REALTIME: {
         if (strcmp (dgfx_config.output_path, DGFX_OUTPUT_PATH_DEFAULT) != 0)
         {
-            fprintf (stderr, "Warning: \"output\" argument is only intended for use in single mode. It's ignored in "
-                             "realtime mode.\n");
+            fprintf (stderr, "Warning: \"output\" argument is only intended for use in single and render modes."
+                             "It's ignored in realtime mode.\n");
         }
 
         dgfx_sdl_loop ();
+    }
+    break;
+    case MODE_RENDER: {
+        dgfx_ffmpeg_render ();
     }
     break;
     default:

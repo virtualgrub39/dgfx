@@ -2,4 +2,5 @@ output.bmp
 dgfx
 *.o
 config.h
-rgb.*
+output.mp4
+output.mkv
